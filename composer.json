@@ -1,0 +1,37 @@
+{
+    "name": "artisan-build/laravel-dependency-analyser",
+    "description": "Laravel-aware Composer dependency analysis powered by ShipMonk",
+    "type": "library",
+    "license": "MIT",
+    "require": {
+        "php": "^8.2",
+        "composer-runtime-api": "^2.2",
+        "ext-json": "*",
+        "shipmonk/composer-dependency-analyser": "~1.8.4"
+    },
+    "require-dev": {
+        "laravel/pint": "^1.0",
+        "phpstan/phpstan": "^2.1",
+        "phpunit/phpunit": "^11.5"
+    },
+    "autoload": {
+        "psr-4": {
+            "ArtisanBuild\\LaravelDependencyAnalyser\\": "src/"
+        }
+    },
+    "autoload-dev": {
+        "psr-4": {
+            "ArtisanBuild\\LaravelDependencyAnalyser\\Tests\\": "tests/"
+        }
+    },
+    "bin": ["bin/laravel-dependency-analyser"],
+    "scripts": {
+        "test": "phpunit",
+        "analyse": "phpstan analyse --memory-limit=512M",
+        "format": "pint",
+        "check": ["@composer validate --strict", "pint --test", "@analyse", "@test"]
+    },
+    "config": {
+        "sort-packages": true
+    }
+}
