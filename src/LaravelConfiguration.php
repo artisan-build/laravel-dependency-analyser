@@ -16,8 +16,11 @@ final class LaravelConfiguration
             }
         }
 
-        if (is_dir($root.'/tests')) {
-            $configuration->addPathToScan($root.'/tests', true);
+        // Factories only run in tests and seeders, which is why Laravel ships Faker as a dev dependency.
+        foreach (['tests', 'database/factories'] as $path) {
+            if (is_dir($root.'/'.$path)) {
+                $configuration->addPathToScan($root.'/'.$path, true);
+            }
         }
 
         // Generated manifests and compiled views are not evidence of application usage.

@@ -227,21 +227,158 @@ PHP);
         self::assertStringContainsString('Laravel Dependency Analyser dev-main', $stdout);
     }
 
+    public function test_global_aliases_resolve_to_the_package_behind_them(): void
+    {
+        $this->package('discovered', extra: ['laravel' => ['aliases' => ['Discovered' => 'Discovered\\Feature']]]);
+        $this->package('configured');
+        $this->write('config/app.php', <<<'PHP'
+<?php
+use Configured\Feature as ConfiguredFeature;
+return ['aliases' => ['Configured' => ConfiguredFeature::class]];
+PHP);
+        $this->write('app/Example.php', '<?php namespace App; class Example { function run() { \\Discovered::go(); \\Configured::go(); } }');
+        $this->composer['autoload']['psr-4']['App\\'] = 'app/';
+        $this->install();
+
+        [$exit, $stdout, $stderr] = $this->analyse();
+
+        self::assertSame(0, $exit, $stdout.$stderr);
+        self::assertStringNotContainsString('unknown class', $stdout);
+        self::assertStringNotContainsString('requiring review', $stderr);
+    }
+
+    public function test_blade_views_are_usage_and_findings_point_at_the_view(): void
+    {
+        $this->package('viewonly');
+        $this->write('resources/views/page.blade.php', <<<'BLADE'
+{{-- \Missing\Commented::class --}}
+<p>{{ \Viewonly\Feature::class }}</p>
+@{{ \Missing\Escaped::class }}
+@if (count($items) > 0)
+    {!! \Missing\Thing::make() !!}
+@endif
+BLADE);
+        $this->install();
+
+        [$exit, $stdout, $stderr] = $this->analyse();
+
+        self::assertSame(1, $exit, $stdout.$stderr);
+        self::assertStringNotContainsString('unused dependenc', $stdout);
+        self::assertStringContainsString('Missing\\Thing', $stdout);
+        self::assertStringContainsString('resources/views/page.blade.php:5', $stdout);
+        self::assertStringNotContainsString('Missing\\Commented', $stdout);
+        self::assertStringNotContainsString('Missing\\Escaped', $stdout);
+    }
+
+    public function test_factories_are_dev_code(): void
+    {
+        $this->package('faker', dev: true);
+        $this->write('database/factories/UserFactory.php', '<?php Faker\\Feature::class;');
+        $this->install();
+
+        [$exit, $stdout, $stderr] = $this->analyse();
+
+        self::assertSame(0, $exit, $stdout.$stderr);
+        self::assertStringNotContainsString('dev dependency in production', $stdout);
+    }
+
+    public function test_classes_declared_in_test_files_are_not_unknown(): void
+    {
+        $this->package('used');
+        $this->write('routes/web.php', '<?php Used\\Feature::class;');
+        $this->write('tests/ExampleTest.php', "<?php\nabstract class HelperTestCase {}\nuses(HelperTestCase::class);");
+        $this->install();
+
+        [$exit, $stdout, $stderr] = $this->analyse();
+
+        self::assertSame(0, $exit, $stdout.$stderr);
+        self::assertStringNotContainsString('HelperTestCase', $stdout);
+    }
+
+    public function test_optional_integrations_of_used_packages_need_review_with_the_reason(): void
+    {
+        $this->package('host', metadata: ['suggest' => ['test/driver' => 'Required to use the driver.']]);
+        $this->package('driver');
+        $this->write('routes/web.php', '<?php Host\\Feature::class;');
+        $this->install();
+
+        [$exit, $stdout, $stderr] = $this->analyse();
+
+        self::assertSame(2, $exit, $stdout.$stderr);
+        self::assertStringNotContainsString('test/driver', $stdout);
+        self::assertStringContainsString('test/driver <- test/host: Required to use the driver.', $stderr);
+    }
+
+    public function test_config_selected_drivers_and_tooling_count_as_usage(): void
+    {
+        $this->package('s3', fullName: 'league/flysystem-aws-s3-v3');
+        $this->package('runner', fullName: 'brianium/paratest');
+        $this->package('cli', metadata: ['bin' => ['bin/cli-tool']]);
+        $this->write('packages/cli/bin/cli-tool', '#!/usr/bin/env php');
+        $this->write('config/filesystems.php', "<?php return ['disks' => ['uploads' => ['driver' => 's3']]];");
+        $this->write('app/Upload.php', "<?php return ['disk' => 'uploads'];");
+        $this->composer['scripts'] = ['test-parallel' => '@php artisan test --parallel', 'tool' => 'vendor/bin/cli-tool'];
+        $this->install();
+
+        [$exit, $stdout, $stderr] = $this->analyse();
+
+        self::assertSame(1, $exit, $stdout.$stderr);
+        self::assertStringNotContainsString('unused dependenc', $stdout);
+        self::assertStringContainsString("league/flysystem-aws-s3-v3: app/Upload.php uses the 'uploads' disk (s3 driver)", $stderr);
+        self::assertStringContainsString('brianium/paratest: tooling: composer script "test-parallel"', $stderr);
+        self::assertStringContainsString('used only in dev paths', $stdout);
+        self::assertStringContainsString('test/cli', $stdout);
+    }
+
+    public function test_framework_requirements_are_not_reported_as_shadow_dependencies(): void
+    {
+        $this->package('framework', requires: ['test/carbon' => '*'], fullName: 'laravel/framework', metadata: ['version' => '99.0.0']);
+        $this->package('carbon');
+        $this->package('direct', requires: ['test/transitive' => '*']);
+        $this->package('transitive');
+        unset($this->composer['require']['test/carbon'], $this->composer['require']['test/transitive']);
+        $this->write('routes/web.php', '<?php Framework\\Feature::class; Carbon\\Feature::class; Direct\\Feature::class; Transitive\\Feature::class;');
+        $this->install();
+
+        [$exit, $stdout, $stderr] = $this->analyse();
+
+        self::assertSame(1, $exit, $stdout.$stderr);
+        self::assertStringContainsString('test/transitive', $stdout);
+        self::assertStringNotContainsString('test/carbon', $stdout);
+        self::assertStringContainsString('laravel/framework requires them directly', $stderr);
+    }
+
+    public function test_review_shows_published_config_and_env_setup(): void
+    {
+        $this->package('registered', extra: ['laravel' => ['providers' => ['Registered\\Feature']]]);
+        $this->write('packages/registered/config/registered.php', "<?php return ['token' => env('REGISTERED_TOKEN'), 'name' => env('APP_NAME')];");
+        $this->write('config/registered.php', '<?php return [];');
+        $this->write('.env.example', "APP_NAME=Laravel\nREGISTERED_TOKEN=\n");
+        $this->install();
+
+        [$exit, , $stderr] = $this->analyse();
+
+        self::assertSame(2, $exit, $stderr);
+        self::assertStringContainsString('(config/registered.php published; .env.example sets REGISTERED_TOKEN)', $stderr);
+    }
+
     /** @param array<string, mixed> $extra
      * @param  array<string, string>  $requires
+     * @param  array<string, mixed>  $metadata
      */
-    private function package(string $name, array $extra = [], bool $dev = false, array $requires = []): void
+    private function package(string $name, array $extra = [], bool $dev = false, array $requires = [], ?string $fullName = null, array $metadata = []): void
     {
         $namespace = ucfirst($name);
-        $this->write('packages/'.$name.'/composer.json', json_encode([
-            'name' => 'test/'.$name,
+        $fullName ??= 'test/'.$name;
+        $this->write('packages/'.$name.'/composer.json', json_encode($metadata + [
+            'name' => $fullName,
             'version' => '1.0.0',
             'autoload' => ['psr-4' => [$namespace.'\\' => 'src/']],
             'extra' => (object) $extra,
             'require' => (object) $requires,
         ], JSON_THROW_ON_ERROR));
         $this->write('packages/'.$name.'/src/Feature.php', '<?php namespace '.$namespace.'; class Feature {}');
-        $this->composer[$dev ? 'require-dev' : 'require']['test/'.$name] = '*';
+        $this->composer[$dev ? 'require-dev' : 'require'][$fullName] = '*';
     }
 
     private function write(string $path, string $content): void
